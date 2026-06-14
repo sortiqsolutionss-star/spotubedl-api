@@ -388,7 +388,7 @@ def api_download(
                 traceback.print_exc()
                 print(f"Failed resolving {t['title']}: {err}")
                 t_copy = t.copy()
-                t_copy['direct_stream_url'] = None
+                t_copy['direct_stream_url'] = f"ERROR: {str(err)}"
                 return t_copy
                 
         with ThreadPoolExecutor(max_workers=5) as executor:
