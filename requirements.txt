@@ -2,3 +2,4 @@ fastapi
 uvicorn
 requests
 yt-dlp
+mutagen
