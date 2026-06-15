@@ -183,116 +183,123 @@ def get_playlist_metadata(playlist_id, access_token, client_token):
         "tracks": all_tracks
     }
 
-def tag_mp3(file_path, title, artists, album, year, cover_url):
+def get_converter_sanity_key():
     try:
-        from mutagen.mp3 import MP3
-        from mutagen.id3 import ID3, APIC, TPE1, TALB, TIT2, TYER
-        
-        try:
-            audio = MP3(file_path, ID3=ID3)
-            if audio.tags is None:
-                audio.add_tags()
-        except Exception:
-            audio = MP3(file_path)
-            audio.add_tags()
-            
-        if title:
-            audio.tags.add(TIT2(encoding=3, text=title))
-        if artists:
-            audio.tags.add(TPE1(encoding=3, text=", ".join(artists)))
-        if album:
-            audio.tags.add(TALB(encoding=3, text=album))
-        if year:
-            audio.tags.add(TYER(encoding=3, text=str(year)))
-            
-        if cover_url:
-            try:
-                img_data = requests.get(cover_url, timeout=10).content
-                mime_type = "image/jpeg"
-                if "png" in cover_url.lower():
-                    mime_type = "image/png"
-                audio.tags.add(APIC(
-                    encoding=3,
-                    mime=mime_type,
-                    type=3,
-                    desc='Cover',
-                    data=img_data
-                ))
-            except Exception as e:
-                print(f"Failed to embed cover art: {e}")
-                
-        audio.save()
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Origin": "https://frame.y2meta-uk.com",
+            "Referer": "https://frame.y2meta-uk.com/"
+        }
+        resp = requests.get("https://cnv.cx/v2/sanity/key", headers=headers, timeout=10)
+        resp.raise_for_status()
+        return resp.json().get("key")
     except Exception as e:
-        print(f"Error tagging MP3: {e}")
+        print(f"Failed to fetch sanity key: {e}")
+        return None
 
-def download_transcode_tag_upload(t):
+def resolve_stream_url(t, sanity_key=None):
     import os
-    import uuid
-    import shutil
-    
-    temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"temp_{uuid.uuid4()}")
-    os.makedirs(temp_dir, exist_ok=True)
-    
     try:
         ydl_opts = {
             'format': 'bestaudio/best',
             'noplaylist': True,
             'quiet': True,
-            'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '320',
-            }],
+            'skip_download': True,
+            'no_warnings': True,
         }
-        
-        if os.path.exists("cookies.txt"):
-            ydl_opts['cookiefile'] = "cookies.txt"
-            
-        query = f"ytsearch:{', '.join(t['artists'])} - {t['title']} official audio"
-        
+        query = f"scsearch:{', '.join(t['artists'])} - {t['title']}"
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(query, download=True)
+            info = ydl.extract_info(query, download=False)
             if 'entries' in info and info['entries']:
                 video_info = info['entries'][0]
             else:
                 video_info = info
-                
+            formats = video_info.get('formats', [])
+            mp3_urls = [f['url'] for f in formats if f.get('url') and 'playlist.m3u8' not in f['url'] and ('.mp3' in f['url'] or 'mp3' in f.get('ext', '') or '128' in f.get('format_id', ''))]
+            if mp3_urls:
+                return mp3_urls[0]
+            u = video_info.get('url')
+            if u and 'playlist.m3u8' not in u:
+                return u
+            raise Exception("No direct MP3 format on SoundCloud")
+    except Exception as e:
+        print(f"SoundCloud stream resolution failed: {e}")
+        
+    try:
+        search_opts = {
+            'format': 'bestaudio/best',
+            'noplaylist': True,
+            'quiet': True,
+            'skip_download': True,
+            'no_warnings': True,
+        }
+        if os.path.exists("cookies.txt"):
+            search_opts['cookiefile'] = "cookies.txt"
+        
+        query_yt = f"ytsearch:{', '.join(t['artists'])} - {t['title']} official audio"
+        with yt_dlp.YoutubeDL(search_opts) as ydl:
+            info = ydl.extract_info(query_yt, download=False)
+            if 'entries' in info and info['entries']:
+                video_info = info['entries'][0]
+            else:
+                video_info = info
             video_id = video_info['id']
-            mp3_filepath = os.path.join(temp_dir, f"{video_id}.mp3")
             
-        if not os.path.exists(mp3_filepath):
-            raise Exception("Failed to generate tagged MP3 file")
-            
-        tag_mp3(
-            file_path=mp3_filepath,
-            title=t["title"],
-            artists=t["artists"],
-            album=t.get("album"),
-            year=t.get("year"),
-            cover_url=t.get("cover_url")
-        )
+        if video_id:
+            if not sanity_key:
+                sanity_key = get_converter_sanity_key()
+            if sanity_key:
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Origin": "https://frame.y2meta-uk.com",
+                    "Referer": "https://frame.y2meta-uk.com/"
+                }
+                post_headers = headers.copy()
+                post_headers.update({
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "accept": "*/*",
+                    "key": sanity_key
+                })
+                post_data = {
+                    "link": f"https://youtu.be/{video_id}",
+                    "format": "mp3",
+                    "audioBitrate": "320",
+                    "videoQuality": "720",
+                    "filenameStyle": "pretty",
+                    "vCodec": "h264"
+                }
+                conv_resp = requests.post("https://cnv.cx/v2/converter", headers=post_headers, data=post_data, timeout=20)
+                conv_resp.raise_for_status()
+                download_url = conv_resp.json().get("url")
+                if download_url:
+                    return download_url
+    except Exception as e:
+        print(f"Converter API resolution failed: {e}")
         
-        clean_title = re.sub(r'[\\/*?:"<>|]', "", t["title"]).strip()
-        filename = f"{clean_title}.mp3" if clean_title else "track.mp3"
+    try:
+        ydl_opts_fallback = {
+            'format': 'bestaudio/best',
+            'noplaylist': True,
+            'quiet': True,
+            'skip_download': True,
+            'no_warnings': True,
+        }
+        if os.path.exists("cookies.txt"):
+            ydl_opts_fallback['cookiefile'] = "cookies.txt"
+        query_yt = f"ytsearch:{', '.join(t['artists'])} - {t['title']} official audio"
+        with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
+            info = ydl.extract_info(query_yt, download=False)
+            if 'entries' in info and info['entries']:
+                video_info = info['entries'][0]
+            else:
+                video_info = info
+            u = video_info['url']
+            if u and 'playlist.m3u8' not in u:
+                return u
+    except Exception as e:
+        print(f"Local YouTube resolution failed: {e}")
         
-        with open(mp3_filepath, "rb") as f:
-            files = {'files': (filename, f, 'audio/mpeg')}
-            data = {'expiryHours': '24'}
-            resp = requests.post("https://tempfile.org/api/upload/local", files=files, data=data, timeout=60)
-            
-        if resp.status_code != 200:
-            raise Exception(f"Upload to tempfile.org failed: {resp.text}")
-            
-        result = resp.json()
-        if not result.get("success"):
-            raise Exception(f"tempfile.org upload failed: {result.get('error')}")
-            
-        file_id = result["files"][0]["id"]
-        return f"https://tempfile.org/{file_id}/download"
-        
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+    raise Exception("Failed to resolve stream URL from all sources")
 
 @app.post("/api/metadata")
 def api_get_metadata(
@@ -362,6 +369,10 @@ def api_download(
         if not url_type:
             raise HTTPException(status_code=400, detail="Invalid Spotify URL format.")
             
+        selected = request.selected_ids
+        if selected:
+            selected = [i for i in selected if i and i != "string" and i != "default"]
+            
         tracks_to_resolve = []
         if url_type == "track":
             meta = get_track_metadata(resource_id, access_token, client_token)
@@ -369,24 +380,24 @@ def api_download(
         else:
             playlist_meta = get_playlist_metadata(resource_id, access_token, client_token)
             for t in playlist_meta["tracks"]:
-                if not request.selected_ids or t["id"] in request.selected_ids:
+                if not selected or t["id"] in selected:
                     tracks_to_resolve.append(t)
                     
         if not tracks_to_resolve:
             raise HTTPException(status_code=400, detail="No tracks selected or found for download")
             
         resolved_tracks = []
+        sanity_key = get_converter_sanity_key()
         
         def resolve_single(t):
             try:
-                direct_url = download_transcode_tag_upload(t)
+                direct_url = resolve_stream_url(t, sanity_key=sanity_key)
                 t_copy = t.copy()
                 t_copy['direct_stream_url'] = direct_url
                 return t_copy
             except Exception as err:
                 import traceback
                 traceback.print_exc()
-                print(f"Failed resolving {t['title']}: {err}")
                 t_copy = t.copy()
                 t_copy['direct_stream_url'] = f"ERROR: {str(err)}"
                 return t_copy
@@ -419,7 +430,7 @@ def stream_track(
             access_token, client_token, _, _ = get_spotify_tokens()
             
         meta = get_track_metadata(track_id, access_token, client_token)
-        direct_url = download_transcode_tag_upload(meta)
+        direct_url = resolve_stream_url(meta)
         if not direct_url:
             raise Exception("Could not resolve streaming URL")
         return RedirectResponse(url=direct_url)
