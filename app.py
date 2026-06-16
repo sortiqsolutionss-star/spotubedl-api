@@ -197,107 +197,135 @@ def get_converter_sanity_key():
         print(f"Failed to fetch sanity key: {e}")
         return None
 
+def get_search_queries(t):
+    title_clean = t['title'].replace('"', '').replace("'", "")
+    artists_clean = [a.replace('"', '').replace("'", "") for a in t['artists']] if t.get('artists') else []
+    
+    queries = []
+    if artists_clean:
+        first_artist = artists_clean[0]
+        queries.append(f"{first_artist} {title_clean}")
+        base_title = re.sub(r'\(.*?\)|\[.*?\]', '', title_clean).strip()
+        if base_title and base_title != title_clean:
+            queries.append(f"{first_artist} {base_title}")
+        queries.append(f"{' '.join(artists_clean)} {title_clean}")
+    else:
+        queries.append(title_clean)
+    
+    seen = set()
+    unique_queries = []
+    for q in queries:
+        q_strip = q.strip()
+        if q_strip and q_strip not in seen:
+            seen.add(q_strip)
+            unique_queries.append(q_strip)
+    return unique_queries
+
 def resolve_stream_url(t, sanity_key=None):
     import os
-    try:
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'noplaylist': True,
-            'quiet': True,
-            'skip_download': True,
-            'no_warnings': True,
-        }
-        query = f"scsearch:{', '.join(t['artists'])} - {t['title']}"
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(query, download=False)
-            if 'entries' in info and info['entries']:
-                video_info = info['entries'][0]
-            else:
-                video_info = info
-            formats = video_info.get('formats', [])
-            mp3_urls = [f['url'] for f in formats if f.get('url') and 'playlist.m3u8' not in f['url'] and ('.mp3' in f['url'] or 'mp3' in f.get('ext', '') or '128' in f.get('format_id', ''))]
-            if mp3_urls:
-                return mp3_urls[0]
-            u = video_info.get('url')
-            if u and 'playlist.m3u8' not in u:
-                return u
-            raise Exception("No direct MP3 format on SoundCloud")
-    except Exception as e:
-        print(f"SoundCloud stream resolution failed: {e}")
+    search_queries = get_search_queries(t)
+    
+    for query in search_queries:
+        try:
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'noplaylist': True,
+                'quiet': True,
+                'skip_download': True,
+                'no_warnings': True,
+            }
+            sc_query = f"scsearch:{query}"
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(sc_query, download=False)
+                if 'entries' in info and info['entries']:
+                    video_info = info['entries'][0]
+                else:
+                    video_info = info
+                formats = video_info.get('formats', [])
+                mp3_urls = [f['url'] for f in formats if f.get('url') and 'playlist.m3u8' not in f['url'] and ('.mp3' in f['url'] or 'mp3' in f.get('ext', '') or '128' in f.get('format_id', ''))]
+                if mp3_urls:
+                    return mp3_urls[0]
+                u = video_info.get('url')
+                if u and 'playlist.m3u8' not in u:
+                    return u
+        except Exception as e:
+            print(f"SoundCloud resolution failed for query '{query}': {e}")
         
-    try:
-        search_opts = {
-            'format': 'bestaudio/best',
-            'noplaylist': True,
-            'quiet': True,
-            'skip_download': True,
-            'no_warnings': True,
-        }
-        if os.path.exists("cookies.txt"):
-            search_opts['cookiefile'] = "cookies.txt"
-        
-        query_yt = f"ytsearch:{', '.join(t['artists'])} - {t['title']} official audio"
-        with yt_dlp.YoutubeDL(search_opts) as ydl:
-            info = ydl.extract_info(query_yt, download=False)
-            if 'entries' in info and info['entries']:
-                video_info = info['entries'][0]
-            else:
-                video_info = info
-            video_id = video_info['id']
+    for query in search_queries:
+        try:
+            search_opts = {
+                'format': 'bestaudio/best',
+                'noplaylist': True,
+                'quiet': True,
+                'skip_download': True,
+                'no_warnings': True,
+            }
+            if os.path.exists("cookies.txt"):
+                search_opts['cookiefile'] = "cookies.txt"
             
-        if video_id:
-            if not sanity_key:
-                sanity_key = get_converter_sanity_key()
-            if sanity_key:
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Origin": "https://frame.y2meta-uk.com",
-                    "Referer": "https://frame.y2meta-uk.com/"
-                }
-                post_headers = headers.copy()
-                post_headers.update({
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "accept": "*/*",
-                    "key": sanity_key
-                })
-                post_data = {
-                    "link": f"https://youtu.be/{video_id}",
-                    "format": "mp3",
-                    "audioBitrate": "320",
-                    "videoQuality": "720",
-                    "filenameStyle": "pretty",
-                    "vCodec": "h264"
-                }
-                conv_resp = requests.post("https://cnv.cx/v2/converter", headers=post_headers, data=post_data, timeout=20)
-                conv_resp.raise_for_status()
-                download_url = conv_resp.json().get("url")
-                if download_url:
-                    return download_url
-    except Exception as e:
-        print(f"Converter API resolution failed: {e}")
+            query_yt = f"ytsearch:{query} official audio"
+            with yt_dlp.YoutubeDL(search_opts) as ydl:
+                info = ydl.extract_info(query_yt, download=False)
+                if 'entries' in info and info['entries']:
+                    video_info = info['entries'][0]
+                else:
+                    video_info = info
+                video_id = video_info.get('id')
+                
+            if video_id:
+                if not sanity_key:
+                    sanity_key = get_converter_sanity_key()
+                if sanity_key:
+                    headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        "Origin": "https://frame.y2meta-uk.com",
+                        "Referer": "https://frame.y2meta-uk.com/"
+                    }
+                    post_headers = headers.copy()
+                    post_headers.update({
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "accept": "*/*",
+                        "key": sanity_key
+                    })
+                    post_data = {
+                        "link": f"https://youtu.be/{video_id}",
+                        "format": "mp3",
+                        "audioBitrate": "320",
+                        "videoQuality": "720",
+                        "filenameStyle": "pretty",
+                        "vCodec": "h264"
+                    }
+                    conv_resp = requests.post("https://cnv.cx/v2/converter", headers=post_headers, data=post_data, timeout=20)
+                    conv_resp.raise_for_status()
+                    download_url = conv_resp.json().get("url")
+                    if download_url:
+                        return download_url
+        except Exception as e:
+            print(f"Converter API resolution failed for query '{query}': {e}")
         
-    try:
-        ydl_opts_fallback = {
-            'format': 'bestaudio/best',
-            'noplaylist': True,
-            'quiet': True,
-            'skip_download': True,
-            'no_warnings': True,
-        }
-        if os.path.exists("cookies.txt"):
-            ydl_opts_fallback['cookiefile'] = "cookies.txt"
-        query_yt = f"ytsearch:{', '.join(t['artists'])} - {t['title']} official audio"
-        with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
-            info = ydl.extract_info(query_yt, download=False)
-            if 'entries' in info and info['entries']:
-                video_info = info['entries'][0]
-            else:
-                video_info = info
-            u = video_info['url']
-            if u and 'playlist.m3u8' not in u:
-                return u
-    except Exception as e:
-        print(f"Local YouTube resolution failed: {e}")
+    for query in search_queries:
+        try:
+            ydl_opts_fallback = {
+                'format': 'bestaudio/best',
+                'noplaylist': True,
+                'quiet': True,
+                'skip_download': True,
+                'no_warnings': True,
+            }
+            if os.path.exists("cookies.txt"):
+                ydl_opts_fallback['cookiefile'] = "cookies.txt"
+            query_yt = f"ytsearch:{query} official audio"
+            with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
+                info = ydl.extract_info(query_yt, download=False)
+                if 'entries' in info and info['entries']:
+                    video_info = info['entries'][0]
+                else:
+                    video_info = info
+                u = video_info.get('url')
+                if u and 'playlist.m3u8' not in u:
+                    return u
+        except Exception as e:
+            print(f"Local YouTube resolution failed for query '{query}': {e}")
         
     raise Exception("Failed to resolve stream URL from all sources")
 
