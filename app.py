@@ -4,7 +4,7 @@ import yt_dlp
 from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
-from spotify import get_spotify_tokens
+from spotify import get_spotify_tokens, fetch_free_proxies
 from concurrent.futures import ThreadPoolExecutor
 
 app = FastAPI(title="SpotiDownload API")
@@ -221,7 +221,7 @@ def get_search_queries(t):
             unique_queries.append(q_strip)
     return unique_queries
 
-def resolve_stream_url(t, sanity_key=None):
+def _resolve_stream_url_impl(t, proxy=None, sanity_key=None):
     import os
     search_queries = get_search_queries(t)
     
@@ -234,6 +234,8 @@ def resolve_stream_url(t, sanity_key=None):
                 'skip_download': True,
                 'no_warnings': True,
             }
+            if proxy:
+                ydl_opts['proxy'] = f"http://{proxy}"
             sc_query = f"scsearch:{query}"
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(sc_query, download=False)
@@ -260,6 +262,8 @@ def resolve_stream_url(t, sanity_key=None):
                 'skip_download': True,
                 'no_warnings': True,
             }
+            if proxy:
+                search_opts['proxy'] = f"http://{proxy}"
             if os.path.exists("cookies.txt"):
                 search_opts['cookiefile'] = "cookies.txt"
             
@@ -295,7 +299,13 @@ def resolve_stream_url(t, sanity_key=None):
                         "filenameStyle": "pretty",
                         "vCodec": "h264"
                     }
-                    conv_resp = requests.post("https://cnv.cx/v2/converter", headers=post_headers, data=post_data, timeout=20)
+                    req_proxies = None
+                    if proxy:
+                        req_proxies = {
+                            "http": f"http://{proxy}",
+                            "https": f"http://{proxy}"
+                        }
+                    conv_resp = requests.post("https://cnv.cx/v2/converter", headers=post_headers, data=post_data, proxies=req_proxies, timeout=20)
                     conv_resp.raise_for_status()
                     download_url = conv_resp.json().get("url")
                     if download_url:
@@ -312,6 +322,8 @@ def resolve_stream_url(t, sanity_key=None):
                 'skip_download': True,
                 'no_warnings': True,
             }
+            if proxy:
+                ydl_opts_fallback['proxy'] = f"http://{proxy}"
             if os.path.exists("cookies.txt"):
                 ydl_opts_fallback['cookiefile'] = "cookies.txt"
             query_yt = f"ytsearch:{query} official audio"
@@ -328,6 +340,22 @@ def resolve_stream_url(t, sanity_key=None):
             print(f"Local YouTube resolution failed for query '{query}': {e}")
         
     raise Exception("Failed to resolve stream URL from all sources")
+
+def resolve_stream_url(t, sanity_key=None):
+    try:
+        return _resolve_stream_url_impl(t, None, sanity_key)
+    except Exception as e:
+        print(f"Direct stream resolution failed: {e}. Trying via proxies...")
+        
+    proxies = fetch_free_proxies()
+    for proxy in proxies[:10]:
+        try:
+            return _resolve_stream_url_impl(t, proxy, sanity_key)
+        except Exception as err:
+            print(f"Proxy {proxy} failed for stream resolution: {err}")
+            continue
+            
+    raise Exception("Failed to resolve stream URL from all sources (direct and proxy)")
 
 @app.post("/api/metadata")
 def api_get_metadata(
