@@ -34,11 +34,20 @@ def generate_totp(secret_bytes, timestamp, digits=6, period=30):
 
 secret = decode_secret(SECRET)
 
-def get_spotify_tokens():
-    secret = decode_secret(SECRET)
-    
+def fetch_free_proxies():
     try:
-        server_time = requests.get(
+        url = "https://api.proxyscrape.com/v4/free-proxy-list/get?request=displayproxies&protocol=http&timeout=3000&country=all&ssl=yes&anonymity=all"
+        r = requests.get(url, timeout=5)
+        if r.status_code == 200:
+            proxies = [line.strip() for line in r.text.strip().split("\n") if line.strip()]
+            return proxies
+    except Exception as e:
+        print(f"Failed to fetch proxies from proxyscrape: {e}")
+    return []
+
+def _fetch_tokens_with_session(s, secret):
+    try:
+        server_time = s.get(
             "https://open.spotify.com/api/server-time", timeout=5
         ).json()["serverTime"]
     except Exception as e:
@@ -49,7 +58,7 @@ def get_spotify_tokens():
     totp = generate_totp(secret, server_time)
     totp_server = generate_totp(secret, server_time)
     
-    r = requests.get(
+    r = s.get(
         "https://open.spotify.com/api/token",
         params={
             "reason": "init",
@@ -58,13 +67,15 @@ def get_spotify_tokens():
             "totpServer": totp_server,
             "totpVer": "61",
         },
+        timeout=5
     )
+    r.raise_for_status()
 
     token_resp = r.json()
     client_id = token_resp["clientId"]
     access_token = token_resp["accessToken"]
 
-    client_token_resp = session.post(
+    client_token_resp = s.post(
         "https://clienttoken.spotify.com/v1/clienttoken",
         headers={
             "accept": "application/json",
@@ -87,11 +98,37 @@ def get_spotify_tokens():
                 },
             }
         },
-
+        timeout=5
     ).json()
     
     client_token = client_token_resp["granted_token"]["token"]
     return access_token, client_token, token_resp, client_token_resp
+
+def get_spotify_tokens():
+    secret = decode_secret(SECRET)
+    
+    try:
+        return _fetch_tokens_with_session(requests.Session(), secret)
+    except Exception as e:
+        print(f"Direct connection failed: {e}. Trying via free proxies...")
+        
+    proxy_ips = fetch_free_proxies()
+    print(f"Found {len(proxy_ips)} potential proxies. Testing...")
+    
+    for proxy in proxy_ips[:15]:
+        s = requests.Session()
+        s.proxies = {
+            "http": f"http://{proxy}",
+            "https": f"http://{proxy}"
+        }
+        try:
+            print(f"Trying proxy: {proxy}")
+            return _fetch_tokens_with_session(s, secret)
+        except Exception as e:
+            print(f"Proxy {proxy} failed: {e}")
+            continue
+            
+    raise Exception("Failed to retrieve Spotify tokens after trying direct connection and multiple proxies.")
 
 if __name__ == "__main__":
     access_token, client_token, token_resp, client_token_resp = get_spotify_tokens()
